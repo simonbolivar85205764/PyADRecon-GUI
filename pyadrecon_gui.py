@@ -4,340 +4,554 @@ PyADRecon GUI - A graphical interface for the PyADRecon CLI tool
 https://github.com/l4rm4nd/PyADRecon
 
 Security hardening applied:
-  - Passwords are passed via environment variable (KRB5CCNAME) or stdin pipe,
-    never as a bare CLI argument when avoidable.
   - subprocess is called with a list (never shell=True) to prevent shell injection.
   - Sensitive fields are masked and cleared from memory on exit.
   - TGT base64 input is validated before use.
+  - Input fields are validated with regex before the command is assembled.
 """
 
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, scrolledtext
+from tkinter import ttk, filedialog, messagebox
 import subprocess
 import threading
 import shutil
-import os
 import sys
 import base64
 import re
 from pathlib import Path
 
 
-# ── Constants ──────────────────────────────────────────────────────────────────
+# ── Palette ────────────────────────────────────────────────────────────────────
 
-APP_TITLE = "PyADRecon GUI"
-APP_VERSION = "1.0.0"
+C = {
+    "bg":           "#0f1117",
+    "surface":      "#1a1d27",
+    "surface2":     "#22263a",
+    "border":       "#2e3250",
+    "accent":       "#5865f2",
+    "accent_hover": "#4752c4",
+    "accent_dim":   "#3b4189",
+    "success":      "#3ba55d",
+    "danger":       "#ed4245",
+    "danger_hover": "#c03537",
+    "warn":         "#faa61a",
+    "text":         "#e3e5e8",
+    "text_muted":   "#8e9297",
+    "text_dim":     "#5c6070",
+    "log_bg":       "#0b0d12",
+    "log_fg":       "#c9d1d9",
+    "log_err":      "#f87171",
+    "log_ok":       "#4ade80",
+    "log_info":     "#60a5fa",
+    "log_warn":     "#fbbf24",
+    "log_dim":      "#4a5065",
+    "input_bg":     "#13151f",
+    "tab_sel":      "#1e2235",
+}
+
+FONT_MAIN   = ("Segoe UI", 10)
+FONT_BOLD   = ("Segoe UI", 10, "bold")
+FONT_SMALL  = ("Segoe UI", 9)
+FONT_SECTION= ("Segoe UI", 8, "bold")
+FONT_MONO   = ("Cascadia Code", 10) if sys.platform == "win32" else ("Menlo", 10)
+
+APP_TITLE   = "PyADRecon GUI"
+APP_VERSION = "2.0.0"
 
 ALL_MODULES = [
-    # Forest & Domain
-    ("forest",                  "Forest"),
-    ("domain",                  "Domain"),
-    ("trusts",                  "Trusts"),
-    ("sites",                   "Sites"),
-    ("subnets",                 "Subnets"),
-    ("schemahistory",           "Schema History"),
-    # Domain Controllers
-    ("domaincontrollers",       "Domain Controllers"),
-    # Users & Groups
-    ("users",                   "Users"),
-    ("userspns",                "User SPNs"),
-    ("groups",                  "Groups"),
-    ("groupmembers",            "Group Members"),
-    ("protectedgroups",         "Protected Groups ⚡"),
-    ("krbtgt",                  "KRBTGT"),
-    ("asreproastable",          "AS-REP Roastable"),
-    ("kerberoastable",          "Kerberoastable"),
-    # Computers & Printers
-    ("computers",               "Computers"),
-    ("computerspns",            "Computer SPNs"),
-    ("printers",                "Printers"),
-    # OUs & GPOs
-    ("ous",                     "OUs"),
-    ("gpos",                    "GPOs"),
-    ("gplinks",                 "GP Links"),
-    # Passwords & Credentials
-    ("passwordpolicy",          "Password Policy"),
-    ("finegrainedpasswordpolicy","Fine-Grained PP 🛑"),
-    ("laps",                    "LAPS 🛑"),
-    ("bitlocker",               "BitLocker 🛑⚡"),
-    # Managed Service Accounts
-    ("groupmanagedserviceaccounts","gMSA ⚡"),
-    ("delegatedmanagedserviceaccounts","dMSA (Win2025+) ⚡"),
-    # Certificates
-    ("certificates",            "ADCS / Certificates ⚡"),
-    # DNS
-    ("dnszones",                "DNS Zones"),
-    ("dnsrecords",              "DNS Records"),
+    # (key, display_label)  — key=None → section header
+    (None,                          "── Forest & Domain ──"),
+    ("forest",                      "Forest"),
+    ("domain",                      "Domain"),
+    ("trusts",                      "Trusts"),
+    ("sites",                       "Sites"),
+    ("subnets",                     "Subnets"),
+    ("schemahistory",               "Schema History"),
+    (None,                          "── Domain Controllers ──"),
+    ("domaincontrollers",           "Domain Controllers"),
+    (None,                          "── Users & Groups ──"),
+    ("users",                       "Users"),
+    ("userspns",                    "User SPNs"),
+    ("groups",                      "Groups"),
+    ("groupmembers",                "Group Members"),
+    ("protectedgroups",             "Protected Groups ⚡"),
+    ("krbtgt",                      "KRBTGT"),
+    ("asreproastable",              "AS-REP Roastable"),
+    ("kerberoastable",              "Kerberoastable"),
+    (None,                          "── Computers & Printers ──"),
+    ("computers",                   "Computers"),
+    ("computerspns",                "Computer SPNs"),
+    ("printers",                    "Printers"),
+    (None,                          "── OUs & GPOs ──"),
+    ("ous",                         "OUs"),
+    ("gpos",                        "GPOs"),
+    ("gplinks",                     "GP Links"),
+    (None,                          "── Passwords & Credentials ──"),
+    ("passwordpolicy",              "Password Policy"),
+    ("finegrainedpasswordpolicy",   "Fine-Grained PP 🛑"),
+    ("laps",                        "LAPS 🛑"),
+    ("bitlocker",                   "BitLocker 🛑⚡"),
+    (None,                          "── Managed Service Accounts ──"),
+    ("groupmanagedserviceaccounts", "gMSA ⚡"),
+    ("delegatedmanagedserviceaccounts", "dMSA (Win2025+) ⚡"),
+    (None,                          "── Certificates ──"),
+    ("certificates",                "ADCS / Certificates ⚡"),
+    (None,                          "── DNS ──"),
+    ("dnszones",                    "DNS Zones"),
+    ("dnsrecords",                  "DNS Records"),
 ]
 
-LEGEND = "🛑 = Requires admin  ⚡ = Beta / may be incorrect"
+LABEL_W = 26   # fixed width for form labels (chars)
 
 
-# ── Helpers ────────────────────────────────────────────────────────────────────
+# ── Validators ─────────────────────────────────────────────────────────────────
 
-def validate_ip_or_hostname(value: str) -> bool:
-    """Basic sanity check: only allow safe characters for DC field."""
-    return bool(re.match(r'^[a-zA-Z0-9.\-_]+$', value))
+def validate_ip_or_hostname(v: str) -> bool:
+    return bool(re.match(r'^[a-zA-Z0-9.\-_]+$', v))
 
+def validate_domain(v: str) -> bool:
+    return bool(re.match(r'^[a-zA-Z0-9.\-]+$', v))
 
-def validate_domain(value: str) -> bool:
-    """Validate domain name format."""
-    return bool(re.match(r'^[a-zA-Z0-9.\-]+$', value))
-
-
-def validate_base64(value: str) -> bool:
-    """Check that a string is valid base64."""
+def validate_base64(v: str) -> bool:
     try:
-        base64.b64decode(value, validate=True)
+        base64.b64decode(v, validate=True)
         return True
     except Exception:
         return False
 
-
 def find_pyadrecon() -> str | None:
-    """Locate the pyadrecon executable on PATH."""
     for name in ("pyadrecon", "pyadrecon.py"):
-        path = shutil.which(name)
-        if path:
-            return path
+        p = shutil.which(name)
+        if p:
+            return p
     return None
 
 
-# ── Main Application ───────────────────────────────────────────────────────────
+# ── Custom widgets ─────────────────────────────────────────────────────────────
+
+class DE(tk.Entry):
+    """Dark-themed entry."""
+    def __init__(self, parent, **kw):
+        kw.setdefault("bg",               C["input_bg"])
+        kw.setdefault("fg",               C["text"])
+        kw.setdefault("insertbackground", C["text"])
+        kw.setdefault("highlightthickness", 1)
+        kw.setdefault("highlightcolor",   C["accent"])
+        kw.setdefault("highlightbackground", C["border"])
+        kw.setdefault("relief",           "flat")
+        kw.setdefault("font",             FONT_MAIN)
+        kw.setdefault("bd",               6)
+        super().__init__(parent, **kw)
+
+
+class DB(tk.Button):
+    """Dark flat button with hover effect."""
+    def __init__(self, parent, primary=True, danger=False, **kw):
+        if danger:
+            bg, hv = C["danger"], C["danger_hover"]
+        elif primary:
+            bg, hv = C["accent"], C["accent_hover"]
+        else:
+            bg, hv = C["surface2"], C["border"]
+
+        kw.setdefault("bg",               bg)
+        kw.setdefault("fg",               C["text"])
+        kw.setdefault("activebackground", hv)
+        kw.setdefault("activeforeground", C["text"])
+        kw.setdefault("relief",           "flat")
+        kw.setdefault("bd",               0)
+        kw.setdefault("padx",             14)
+        kw.setdefault("pady",             7)
+        kw.setdefault("cursor",           "hand2")
+        kw.setdefault("font",             FONT_BOLD if primary else FONT_MAIN)
+        super().__init__(parent, **kw)
+        self._bg, self._hv = bg, hv
+        self.bind("<Enter>", lambda _: self._hover(True))
+        self.bind("<Leave>", lambda _: self._hover(False))
+
+    def _hover(self, on: bool):
+        if str(self.cget("state")) != "disabled":
+            self.config(bg=self._hv if on else self._bg)
+
+
+# ── Main app ───────────────────────────────────────────────────────────────────
 
 class PyADReconGUI(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(APP_TITLE)
+        self.configure(bg=C["bg"])
         self.resizable(True, True)
-        self.minsize(820, 680)
+        self.minsize(860, 600)
+        self.geometry("1100x860")
 
         self._process: subprocess.Popen | None = None
         self._running = False
 
-        # ── Style ──────────────────────────────────────────────────────────────
-        style = ttk.Style(self)
-        style.theme_use("clam")
-        style.configure("TNotebook.Tab", padding=[12, 6])
-        style.configure("Run.TButton", font=("Helvetica", 11, "bold"))
-        style.configure("Danger.TLabel", foreground="red")
-
-        self._build_ui()
+        self._style()
+        self._build()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
-    # ── UI Construction ────────────────────────────────────────────────────────
+    # ── TTK style ──────────────────────────────────────────────────────────────
 
-    def _build_ui(self):
-        # Top bar
-        top = ttk.Frame(self, padding=8)
-        top.pack(fill="x")
-        ttk.Label(top, text=APP_TITLE, font=("Helvetica", 16, "bold")).pack(side="left")
-        ttk.Label(top, text=f"v{APP_VERSION}", foreground="gray").pack(side="left", padx=6)
+    def _style(self):
+        s = ttk.Style(self)
+        s.theme_use("clam")
 
-        # Notebook tabs
-        self._nb = ttk.Notebook(self)
-        self._nb.pack(fill="both", expand=True, padx=10, pady=(0, 4))
+        s.configure(".",
+            background=C["bg"], foreground=C["text"],
+            troughcolor=C["surface"], font=FONT_MAIN)
 
-        self._tab_connection  = ttk.Frame(self._nb, padding=14)
-        self._tab_auth        = ttk.Frame(self._nb, padding=14)
-        self._tab_options     = ttk.Frame(self._nb, padding=14)
-        self._tab_modules     = ttk.Frame(self._nb, padding=14)
-        self._tab_excel       = ttk.Frame(self._nb, padding=14)
-
-        self._nb.add(self._tab_connection, text="  Connection  ")
-        self._nb.add(self._tab_auth,       text="  Authentication  ")
-        self._nb.add(self._tab_options,    text="  Options  ")
-        self._nb.add(self._tab_modules,    text="  Modules  ")
-        self._nb.add(self._tab_excel,      text="  Offline Excel  ")
-
-        self._build_connection_tab()
-        self._build_auth_tab()
-        self._build_options_tab()
-        self._build_modules_tab()
-        self._build_excel_tab()
-
-        # Output area
-        out_frame = ttk.LabelFrame(self, text="Output / Log", padding=6)
-        out_frame.pack(fill="both", expand=True, padx=10, pady=(0, 6))
-
-        self._output = scrolledtext.ScrolledText(
-            out_frame, wrap="word", height=12, bg="#1e1e1e", fg="#d4d4d4",
-            font=("Courier", 10), state="disabled"
+        s.configure("TNotebook",
+            background=C["bg"], borderwidth=0, tabmargins=[0, 0, 0, 0])
+        s.configure("TNotebook.Tab",
+            background=C["surface"], foreground=C["text_muted"],
+            padding=[18, 9], borderwidth=0, font=FONT_MAIN)
+        s.map("TNotebook.Tab",
+            background=[("selected", C["tab_sel"]), ("active", C["surface2"])],
+            foreground=[("selected", C["text"]),    ("active", C["text"])],
         )
-        self._output.pack(fill="both", expand=True)
-        self._output.tag_config("err", foreground="#ff6b6b")
-        self._output.tag_config("ok",  foreground="#6bcb77")
-        self._output.tag_config("info",foreground="#74b9ff")
 
-        # Bottom buttons
-        btn_frame = ttk.Frame(self, padding=(10, 0, 10, 10))
-        btn_frame.pack(fill="x")
+        s.configure("Card.TFrame", background=C["surface"])
+        s.configure("TFrame",      background=C["bg"])
 
-        self._run_btn = ttk.Button(
-            btn_frame, text="▶  Run PyADRecon", style="Run.TButton",
-            command=self._run
+        s.configure("TLabelframe",
+            background=C["surface"], bordercolor=C["border"], relief="flat")
+        s.configure("TLabelframe.Label",
+            background=C["surface"], foreground=C["text_muted"],
+            font=FONT_SECTION)
+
+        s.configure("TCheckbutton",
+            background=C["surface"], foreground=C["text"])
+        s.map("TCheckbutton",
+            background=[("active", C["surface"])],
+            indicatorcolor=[("selected", C["accent"]),
+                            ("!selected", C["input_bg"])])
+
+        s.configure("TRadiobutton",
+            background=C["surface"], foreground=C["text"])
+        s.map("TRadiobutton",
+            background=[("active", C["surface"])],
+            indicatorcolor=[("selected", C["accent"]),
+                            ("!selected", C["input_bg"])])
+
+        s.configure("TSeparator", background=C["border"])
+
+        s.configure("Vertical.TScrollbar",
+            background=C["surface2"], troughcolor=C["surface"],
+            arrowcolor=C["text_dim"], borderwidth=0, relief="flat", width=10)
+        s.map("Vertical.TScrollbar",
+            background=[("active", C["border"])])
+
+        s.configure("Horizontal.TScrollbar",
+            background=C["surface2"], troughcolor=C["surface"],
+            arrowcolor=C["text_dim"], borderwidth=0, relief="flat", height=10)
+        s.map("Horizontal.TScrollbar",
+            background=[("active", C["border"])])
+
+    # ── Main layout ────────────────────────────────────────────────────────────
+
+    def _build(self):
+        # ── Header ────────────────────────────────────────────────────────────
+        hdr = tk.Frame(self, bg=C["surface"], pady=12)
+        hdr.pack(fill="x")
+        tk.Label(hdr, text="⬡  " + APP_TITLE,
+                 bg=C["surface"], fg=C["text"],
+                 font=("Segoe UI", 16, "bold")).pack(side="left", padx=16)
+        tk.Label(hdr, text=f"v{APP_VERSION}",
+                 bg=C["surface"], fg=C["text_dim"],
+                 font=FONT_SMALL).pack(side="left")
+
+        # Status indicator (right)
+        self._status_var = tk.StringVar(value="Idle")
+        self._status_dot = tk.Label(hdr, text="●",
+                                    bg=C["surface"], fg=C["text_dim"],
+                                    font=("Segoe UI", 14))
+        self._status_dot.pack(side="right", padx=(0, 12))
+        tk.Label(hdr, textvariable=self._status_var,
+                 bg=C["surface"], fg=C["text_muted"],
+                 font=FONT_SMALL).pack(side="right", padx=(16, 2))
+
+        tk.Frame(self, bg=C["accent"], height=2).pack(fill="x")
+
+        # ── Vertical PanedWindow (top = tabs, bottom = log) ───────────────────
+        self._pw = tk.PanedWindow(
+            self, orient="vertical",
+            bg=C["border"],
+            sashwidth=7,
+            sashpad=0,
+            sashrelief="flat",
+            opaqueresize=True,
+            showhandle=False,
         )
+        self._pw.pack(fill="both", expand=True)
+
+        # TOP pane
+        top = tk.Frame(self._pw, bg=C["bg"])
+        self._pw.add(top, stretch="always", minsize=320)
+
+        # Notebook
+        self._nb = ttk.Notebook(top)
+        self._nb.pack(fill="both", expand=True, padx=12, pady=(10, 0))
+
+        self._tab_conn    = ttk.Frame(self._nb, style="Card.TFrame", padding=18)
+        self._tab_auth    = ttk.Frame(self._nb, style="Card.TFrame", padding=18)
+        self._tab_opts    = ttk.Frame(self._nb, style="Card.TFrame", padding=18)
+        self._tab_mods    = ttk.Frame(self._nb, style="Card.TFrame", padding=18)
+        self._tab_excel   = ttk.Frame(self._nb, style="Card.TFrame", padding=18)
+
+        self._nb.add(self._tab_conn,  text="  Connection  ")
+        self._nb.add(self._tab_auth,  text="  Authentication  ")
+        self._nb.add(self._tab_opts,  text="  Options  ")
+        self._nb.add(self._tab_mods,  text="  Modules  ")
+        self._nb.add(self._tab_excel, text="  Offline Excel  ")
+
+        self._build_conn()
+        self._build_auth()
+        self._build_opts()
+        self._build_mods()
+        self._build_excel()
+
+        # Action bar
+        self._build_action_bar(top)
+
+        # BOTTOM pane (log)
+        bot = tk.Frame(self._pw, bg=C["surface"])
+        self._pw.add(bot, stretch="always", minsize=110)
+        self._build_log(bot)
+
+        # Place sash after first draw
+        self.after(120, lambda: self._pw.sash_place(0, 0, 490))
+
+    # ── Action bar ─────────────────────────────────────────────────────────────
+
+    def _build_action_bar(self, parent):
+        bar = tk.Frame(parent, bg=C["bg"], pady=10, padx=12)
+        bar.pack(fill="x")
+
+        self._run_btn = DB(bar, text="▶  Run PyADRecon", command=self._run)
         self._run_btn.pack(side="left", padx=(0, 8))
 
-        self._stop_btn = ttk.Button(
-            btn_frame, text="■  Stop", state="disabled",
-            command=self._stop
-        )
-        self._stop_btn.pack(side="left", padx=(0, 8))
-
-        ttk.Button(btn_frame, text="Clear Log", command=self._clear_log).pack(side="left")
+        self._stop_btn = DB(bar, primary=False, danger=True,
+                            text="■  Stop", state="disabled",
+                            command=self._stop)
+        self._stop_btn.pack(side="left")
 
         self._cmd_var = tk.StringVar(value="")
-        ttk.Label(btn_frame, text="Command preview:", foreground="gray").pack(side="left", padx=(16, 4))
-        ttk.Label(btn_frame, textvariable=self._cmd_var, foreground="#74b9ff",
-                  wraplength=400).pack(side="left")
+        tk.Label(bar, text="cmd:", bg=C["bg"], fg=C["text_dim"],
+                 font=FONT_SMALL).pack(side="left", padx=(20, 4))
+        tk.Label(bar, textvariable=self._cmd_var, bg=C["bg"],
+                 fg=C["accent"], font=("Segoe UI", 9),
+                 anchor="w", wraplength=560).pack(side="left", fill="x", expand=True)
 
-    # ── Connection Tab ─────────────────────────────────────────────────────────
+    # ── Log panel ──────────────────────────────────────────────────────────────
 
-    def _build_connection_tab(self):
-        f = self._tab_connection
-        f.columnconfigure(1, weight=1)
+    def _build_log(self, parent):
+        # Log header
+        lhdr = tk.Frame(parent, bg=C["surface"], pady=7, padx=10)
+        lhdr.pack(fill="x")
 
-        def row(label, widget_factory, r, **kw):
-            ttk.Label(f, text=label).grid(row=r, column=0, sticky="w", pady=4, padx=(0, 10))
-            w = widget_factory(f, **kw)
-            w.grid(row=r, column=1, sticky="ew", pady=4)
-            return w
+        tk.Label(lhdr, text="Output / Log",
+                 bg=C["surface"], fg=C["text_muted"],
+                 font=FONT_SECTION).pack(side="left")
 
-        self._dc_var      = tk.StringVar()
-        self._port_var    = tk.StringVar(value="389")
-        self._ssl_var     = tk.BooleanVar(value=False)
+        # Drag hint
+        tk.Label(lhdr, text="⠿ drag sash to resize",
+                 bg=C["surface"], fg=C["text_dim"],
+                 font=("Segoe UI", 8)).pack(side="left", padx=12)
 
-        row("Domain Controller (IP / hostname):", ttk.Entry, 0, textvariable=self._dc_var)
-        row("LDAP Port:", ttk.Entry, 1, textvariable=self._port_var, width=10)
+        DB(lhdr, primary=False, text="Clear",
+           pady=3, padx=10, command=self._clear_log).pack(side="right")
 
-        ttk.Label(f, text="Force SSL/LDAPS (port 636):").grid(row=2, column=0, sticky="w", pady=4)
-        ssl_cb = ttk.Checkbutton(f, variable=self._ssl_var,
-                                  command=self._on_ssl_toggle)
-        ssl_cb.grid(row=2, column=1, sticky="w")
+        self._wrap_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(
+            lhdr, text="Wrap", variable=self._wrap_var,
+            bg=C["surface"], fg=C["text_muted"],
+            selectcolor=C["surface2"], activebackground=C["surface"],
+            font=FONT_SMALL, bd=0, relief="flat",
+            command=self._toggle_wrap,
+        ).pack(side="right", padx=(0, 8))
 
-        ttk.Separator(f).grid(row=3, column=0, columnspan=2, sticky="ew", pady=10)
-        self._output_var = tk.StringVar()
-        ttk.Label(f, text="Output Directory:").grid(row=4, column=0, sticky="w", pady=4)
-        out_row = ttk.Frame(f)
-        out_row.grid(row=4, column=1, sticky="ew")
-        out_row.columnconfigure(0, weight=1)
-        ttk.Entry(out_row, textvariable=self._output_var).grid(row=0, column=0, sticky="ew")
-        ttk.Button(out_row, text="Browse…", command=self._browse_output).grid(row=0, column=1, padx=(4,0))
+        tk.Frame(parent, bg=C["border"], height=1).pack(fill="x")
 
-        ttk.Label(f, text="⚠  PyADRecon always tries LDAPS/636 first; 389 is a fallback unless --ssl.",
-                  foreground="gray", wraplength=500).grid(row=5, column=0, columnspan=2, sticky="w", pady=(12,0))
+        # Text + scrollbars
+        frame = tk.Frame(parent, bg=C["log_bg"])
+        frame.pack(fill="both", expand=True)
+
+        vsb = ttk.Scrollbar(frame, orient="vertical")
+        hsb = ttk.Scrollbar(frame, orient="horizontal")
+
+        self._output = tk.Text(
+            frame,
+            wrap="word",
+            bg=C["log_bg"], fg=C["log_fg"],
+            insertbackground=C["text"],
+            font=FONT_MONO,
+            state="disabled",
+            relief="flat", bd=0,
+            selectbackground=C["accent_dim"],
+            padx=12, pady=10,
+            yscrollcommand=vsb.set,
+            xscrollcommand=hsb.set,
+        )
+        vsb.config(command=self._output.yview)
+        hsb.config(command=self._output.xview)
+
+        vsb.pack(side="right",  fill="y")
+        hsb.pack(side="bottom", fill="x")
+        self._output.pack(side="left", fill="both", expand=True)
+
+        self._output.tag_config("err",  foreground=C["log_err"])
+        self._output.tag_config("ok",   foreground=C["log_ok"])
+        self._output.tag_config("info", foreground=C["log_info"])
+        self._output.tag_config("warn", foreground=C["log_warn"])
+        self._output.tag_config("dim",  foreground=C["log_dim"])
+
+    def _toggle_wrap(self):
+        self._output.config(wrap="word" if self._wrap_var.get() else "none")
+
+    # ── Connection tab ─────────────────────────────────────────────────────────
+
+    def _build_conn(self):
+        f = self._tab_conn
+
+        self._dc_var         = tk.StringVar()
+        self._port_var       = tk.StringVar(value="389")
+        self._ssl_var        = tk.BooleanVar(value=False)
+        self._output_dir_var = tk.StringVar()
+
+        self._sec(f, "Target")
+        self._row(f, "Domain Controller:", DE, textvariable=self._dc_var)
+        self._row(f, "LDAP Port:", DE, textvariable=self._port_var, width=8)
+
+        r = tk.Frame(f, bg=C["surface"])
+        r.pack(fill="x", pady=3)
+        self._lbl(r, "Force SSL / LDAPS:")
+        ttk.Checkbutton(r, variable=self._ssl_var,
+                        command=self._on_ssl_toggle).pack(side="left")
+
+        self._div(f)
+        self._sec(f, "Output")
+
+        r2 = tk.Frame(f, bg=C["surface"])
+        r2.pack(fill="x", pady=3)
+        self._lbl(r2, "Output Directory:")
+        DE(r2, textvariable=self._output_dir_var).pack(
+            side="left", fill="x", expand=True)
+        DB(r2, primary=False, text="Browse…", pady=5, padx=10,
+           command=self._browse_output).pack(side="left", padx=(6, 0))
+
+        self._div(f)
+        tk.Label(f, text="⚠  PyADRecon always tries LDAPS/636 first; 389 is a fallback "
+                         "unless --ssl is set.",
+                 bg=C["surface"], fg=C["text_dim"], font=FONT_SMALL,
+                 wraplength=620, justify="left").pack(anchor="w")
 
     def _on_ssl_toggle(self):
-        if self._ssl_var.get():
-            self._port_var.set("636")
-        else:
-            self._port_var.set("389")
+        self._port_var.set("636" if self._ssl_var.get() else "389")
 
     def _browse_output(self):
         d = filedialog.askdirectory(title="Select output directory")
         if d:
-            self._output_var.set(d)
+            self._output_dir_var.set(d)
 
-    # ── Authentication Tab ─────────────────────────────────────────────────────
+    # ── Authentication tab ─────────────────────────────────────────────────────
 
-    def _build_auth_tab(self):
+    def _build_auth(self):
         f = self._tab_auth
-        f.columnconfigure(1, weight=1)
 
-        self._username_var   = tk.StringVar()
-        self._password_var   = tk.StringVar()
-        self._domain_var     = tk.StringVar()
-        self._auth_var       = tk.StringVar(value="ntlm")
-        self._tgt_file_var   = tk.StringVar()
-        self._tgt_b64_var    = tk.StringVar()
-        self._workstation_var= tk.StringVar()
+        self._username_var    = tk.StringVar()
+        self._password_var    = tk.StringVar()
+        self._domain_var      = tk.StringVar()
+        self._auth_var        = tk.StringVar(value="ntlm")
+        self._tgt_file_var    = tk.StringVar()
+        self._tgt_b64_var     = tk.StringVar()
+        self._workstation_var = tk.StringVar()
 
-        r = 0
-        ttk.Label(f, text="Username:").grid(row=r, column=0, sticky="w", pady=4, padx=(0,10))
-        ttk.Entry(f, textvariable=self._username_var).grid(row=r, column=1, sticky="ew", pady=4)
+        self._sec(f, "Credentials")
+        self._row(f, "Username:", DE, textvariable=self._username_var)
 
-        r += 1
-        ttk.Label(f, text="Password:").grid(row=r, column=0, sticky="w", pady=4)
-        pw_row = ttk.Frame(f)
-        pw_row.grid(row=r, column=1, sticky="ew")
-        pw_row.columnconfigure(0, weight=1)
-        self._pw_entry = ttk.Entry(pw_row, textvariable=self._password_var, show="●")
-        self._pw_entry.grid(row=0, column=0, sticky="ew")
-        self._show_pw_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(pw_row, text="Show", variable=self._show_pw_var,
-                        command=self._toggle_pw).grid(row=0, column=1, padx=(4, 0))
+        # Password row with show/hide
+        pw_row = tk.Frame(f, bg=C["surface"])
+        pw_row.pack(fill="x", pady=3)
+        self._lbl(pw_row, "Password:")
+        self._pw_entry = DE(pw_row, textvariable=self._password_var, show="●")
+        self._pw_entry.pack(side="left", fill="x", expand=True)
+        self._show_pw = tk.BooleanVar(value=False)
+        tk.Checkbutton(
+            pw_row, text="Show", variable=self._show_pw,
+            bg=C["surface"], fg=C["text_muted"],
+            selectcolor=C["surface2"], activebackground=C["surface"],
+            font=FONT_SMALL, bd=0, relief="flat",
+            command=lambda: self._pw_entry.config(
+                show="" if self._show_pw.get() else "●"),
+        ).pack(side="left", padx=(6, 0))
 
-        r += 1
-        ttk.Label(f, text="Domain (e.g. DOMAIN.LOCAL):").grid(row=r, column=0, sticky="w", pady=4)
-        ttk.Entry(f, textvariable=self._domain_var).grid(row=r, column=1, sticky="ew", pady=4)
+        self._row(f, "Domain (e.g. DOMAIN.LOCAL):", DE,
+                  textvariable=self._domain_var)
 
-        r += 1
-        ttk.Separator(f).grid(row=r, column=0, columnspan=2, sticky="ew", pady=10)
+        self._div(f)
+        self._sec(f, "Method")
 
-        r += 1
-        ttk.Label(f, text="Auth Method:").grid(row=r, column=0, sticky="w", pady=4)
-        auth_frame = ttk.Frame(f)
-        auth_frame.grid(row=r, column=1, sticky="w")
-        ttk.Radiobutton(auth_frame, text="NTLM", variable=self._auth_var,
-                        value="ntlm", command=self._on_auth_change).pack(side="left", padx=(0,16))
-        ttk.Radiobutton(auth_frame, text="Kerberos", variable=self._auth_var,
-                        value="kerberos", command=self._on_auth_change).pack(side="left")
+        auth_row = tk.Frame(f, bg=C["surface"])
+        auth_row.pack(anchor="w", pady=3)
+        self._lbl(auth_row, "Auth Method:")
+        for val, label in (("ntlm", "NTLM"), ("kerberos", "Kerberos")):
+            ttk.Radiobutton(auth_row, text=label,
+                            variable=self._auth_var, value=val,
+                            command=self._on_auth_change
+                            ).pack(side="left", padx=(0, 16))
 
-        r += 1
-        ttk.Label(f, text="Workstation (NTLM spoof):").grid(row=r, column=0, sticky="w", pady=4)
-        self._ws_entry = ttk.Entry(f, textvariable=self._workstation_var)
-        self._ws_entry.grid(row=r, column=1, sticky="ew", pady=4)
+        self._row(f, "Workstation (NTLM spoof):", DE,
+                  textvariable=self._workstation_var)
 
-        r += 1
-        ttk.Separator(f).grid(row=r, column=0, columnspan=2, sticky="ew", pady=10)
+        self._div(f)
+        self._sec(f, "Kerberos TGT")
 
-        r += 1
-        ttk.Label(f, text="Kerberos TGT File (.ccache):").grid(row=r, column=0, sticky="w", pady=4)
-        tgt_row = ttk.Frame(f)
-        tgt_row.grid(row=r, column=1, sticky="ew")
-        tgt_row.columnconfigure(0, weight=1)
-        self._tgt_file_entry = ttk.Entry(tgt_row, textvariable=self._tgt_file_var)
-        self._tgt_file_entry.grid(row=0, column=0, sticky="ew")
-        ttk.Button(tgt_row, text="Browse…", command=self._browse_tgt).grid(row=0, column=1, padx=(4, 0))
+        tgt_row = tk.Frame(f, bg=C["surface"])
+        tgt_row.pack(fill="x", pady=3)
+        self._lbl(tgt_row, "TGT File (.ccache):")
+        self._tgt_file_entry = DE(tgt_row, textvariable=self._tgt_file_var)
+        self._tgt_file_entry.pack(side="left", fill="x", expand=True)
+        self._tgt_browse_btn = DB(tgt_row, primary=False, text="Browse…",
+                                  pady=5, padx=10, command=self._browse_tgt)
+        self._tgt_browse_btn.pack(side="left", padx=(6, 0))
 
-        r += 1
-        ttk.Label(f, text="TGT Base64 String:").grid(row=r, column=0, sticky="w", pady=4)
-        self._tgt_b64_entry = ttk.Entry(f, textvariable=self._tgt_b64_var, show="●")
-        self._tgt_b64_entry.grid(row=r, column=1, sticky="ew", pady=4)
+        b64_row = tk.Frame(f, bg=C["surface"])
+        b64_row.pack(fill="x", pady=3)
+        self._lbl(b64_row, "TGT Base64:")
+        self._tgt_b64_entry = DE(b64_row, textvariable=self._tgt_b64_var,
+                                 show="●")
+        self._tgt_b64_entry.pack(side="left", fill="x", expand=True)
 
-        r += 1
-        ttk.Label(f,
-            text="🔒 Passwords/TGTs are never passed via shell=True. "
-                 "Avoid running as root. Use Kerberos to bypass LDAP channel binding.",
-            foreground="gray", wraplength=500
-        ).grid(row=r, column=0, columnspan=2, sticky="w", pady=(12, 0))
+        self._div(f)
+        tk.Label(f,
+            text="🔒  shell=False ensures no shell injection. Passwords are list "
+                 "args, never shell-expanded. Use Kerberos to bypass LDAP channel binding.",
+            bg=C["surface"], fg=C["text_dim"], font=FONT_SMALL,
+            wraplength=620, justify="left").pack(anchor="w")
 
         self._on_auth_change()
 
-    def _toggle_pw(self):
-        self._pw_entry.config(show="" if self._show_pw_var.get() else "●")
-
     def _on_auth_change(self):
         is_krb = self._auth_var.get() == "kerberos"
-        state = "normal" if is_krb else "disabled"
-        self._tgt_file_entry.config(state=state)
-        self._tgt_b64_entry.config(state=state)
-        self._ws_entry.config(state="disabled" if is_krb else "normal")
+        st = "normal" if is_krb else "disabled"
+        for w in (self._tgt_file_entry, self._tgt_b64_entry,
+                  self._tgt_browse_btn):
+            w.config(state=st)
 
     def _browse_tgt(self):
-        f = filedialog.askopenfilename(
-            title="Select Kerberos TGT (.ccache)",
-            filetypes=[("ccache files", "*.ccache"), ("All files", "*")]
+        fp = filedialog.askopenfilename(
+            title="Select Kerberos TGT",
+            filetypes=[("ccache files", "*.ccache"), ("All files", "*")],
         )
-        if f:
-            self._tgt_file_var.set(f)
+        if fp:
+            self._tgt_file_var.set(fp)
 
-    # ── Options Tab ────────────────────────────────────────────────────────────
+    # ── Options tab ────────────────────────────────────────────────────────────
 
-    def _build_options_tab(self):
-        f = self._tab_options
-        f.columnconfigure(1, weight=1)
+    def _build_opts(self):
+        f = self._tab_opts
 
         self._page_size_var    = tk.StringVar(value="500")
         self._threads_var      = tk.StringVar(value="")
@@ -347,94 +561,126 @@ class PyADReconGUI(tk.Tk):
         self._no_excel_var     = tk.BooleanVar(value=False)
         self._verbose_var      = tk.BooleanVar(value=False)
 
-        rows = [
-            ("LDAP Page Size:",           self._page_size_var,  "500"),
-            ("Threads:",                  self._threads_var,    "auto"),
-            ("Dormant Account Days:",     self._dormant_var,    "90"),
-            ("Password Age Threshold:",   self._pw_age_var,     "180"),
-        ]
+        self._sec(f, "Performance")
+        self._row(f, "LDAP Page Size:", DE, textvariable=self._page_size_var, width=12)
+        self._row(f, "Threads:", DE, textvariable=self._threads_var, width=12)
 
-        for i, (label, var, _) in enumerate(rows):
-            ttk.Label(f, text=label).grid(row=i, column=0, sticky="w", pady=6, padx=(0, 10))
-            ttk.Entry(f, textvariable=var, width=12).grid(row=i, column=1, sticky="w", pady=6)
+        self._div(f)
+        self._sec(f, "Thresholds")
+        self._row(f, "Dormant Account Days:", DE, textvariable=self._dormant_var, width=12)
+        self._row(f, "Password Age Days:", DE, textvariable=self._pw_age_var, width=12)
 
-        r = len(rows)
+        self._div(f)
+        self._sec(f, "Flags")
         for text, var in [
-            ("Only collect enabled objects (--only-enabled)", self._only_enabled_var),
-            ("Skip Excel report generation (--no-excel)",     self._no_excel_var),
-            ("Verbose output (-v)",                            self._verbose_var),
+            ("Only collect enabled objects  (--only-enabled)", self._only_enabled_var),
+            ("Skip Excel report generation  (--no-excel)",     self._no_excel_var),
+            ("Verbose output  (-v)",                            self._verbose_var),
         ]:
-            ttk.Checkbutton(f, text=text, variable=var).grid(
-                row=r, column=0, columnspan=2, sticky="w", pady=4)
-            r += 1
+            r = tk.Frame(f, bg=C["surface"])
+            r.pack(anchor="w", pady=2)
+            ttk.Checkbutton(r, text=text, variable=var).pack(side="left")
 
-    # ── Modules Tab ────────────────────────────────────────────────────────────
+    # ── Modules tab ────────────────────────────────────────────────────────────
 
-    def _build_modules_tab(self):
-        f = self._tab_modules
+    def _build_mods(self):
+        f = self._tab_mods
 
-        ttk.Label(f, text="Select collection modules to run (leave all unchecked = run ALL):").pack(anchor="w")
-        ttk.Label(f, text=LEGEND, foreground="gray").pack(anchor="w", pady=(0, 8))
+        tk.Label(f, text="Select modules to collect — leave all unchecked to run ALL",
+                 bg=C["surface"], fg=C["text_muted"], font=FONT_SMALL
+                 ).pack(anchor="w")
+        tk.Label(f, text="🛑 Requires admin   ⚡ Beta",
+                 bg=C["surface"], fg=C["text_dim"], font=FONT_SMALL
+                 ).pack(anchor="w", pady=(2, 8))
 
-        btn_row = ttk.Frame(f)
+        btn_row = tk.Frame(f, bg=C["surface"])
         btn_row.pack(anchor="w", pady=(0, 8))
-        ttk.Button(btn_row, text="Select All",   command=lambda: self._set_all_modules(True)).pack(side="left", padx=(0, 6))
-        ttk.Button(btn_row, text="Deselect All", command=lambda: self._set_all_modules(False)).pack(side="left")
+        DB(btn_row, text="Select All", pady=4, padx=10,
+           command=lambda: self._set_all_mods(True)).pack(side="left", padx=(0, 6))
+        DB(btn_row, primary=False, text="Deselect All", pady=4, padx=10,
+           command=lambda: self._set_all_mods(False)).pack(side="left")
 
-        canvas_frame = ttk.Frame(f)
-        canvas_frame.pack(fill="both", expand=True)
+        # Scrollable canvas
+        outer = tk.Frame(f, bg=C["surface"])
+        outer.pack(fill="both", expand=True)
 
-        canvas = tk.Canvas(canvas_frame, borderwidth=0, highlightthickness=0)
-        scrollbar = ttk.Scrollbar(canvas_frame, orient="vertical", command=canvas.yview)
-        canvas.configure(yscrollcommand=scrollbar.set)
-        scrollbar.pack(side="right", fill="y")
-        canvas.pack(side="left", fill="both", expand=True)
+        cv = tk.Canvas(outer, bg=C["surface"], highlightthickness=0, bd=0)
+        vsb = ttk.Scrollbar(outer, orient="vertical", command=cv.yview)
+        cv.configure(yscrollcommand=vsb.set)
+        vsb.pack(side="right", fill="y")
+        cv.pack(side="left", fill="both", expand=True)
 
-        inner = ttk.Frame(canvas)
-        inner_window = canvas.create_window((0, 0), window=inner, anchor="nw")
+        inner = tk.Frame(cv, bg=C["surface"])
+        wid = cv.create_window((0, 0), window=inner, anchor="nw")
 
-        def on_configure(event):
-            canvas.configure(scrollregion=canvas.bbox("all"))
-            canvas.itemconfig(inner_window, width=event.width)
+        def _on_resize(e):
+            cv.configure(scrollregion=cv.bbox("all"))
+            cv.itemconfig(wid, width=e.width)
 
-        canvas.bind("<Configure>", on_configure)
+        cv.bind("<Configure>", _on_resize)
+        cv.bind("<MouseWheel>",
+                lambda e: cv.yview_scroll(-1*(e.delta//120), "units"))
 
         self._module_vars: dict[str, tk.BooleanVar] = {}
-        cols = 3
-        for idx, (key, label) in enumerate(ALL_MODULES):
-            var = tk.BooleanVar(value=False)
-            self._module_vars[key] = var
-            cb = ttk.Checkbutton(inner, text=label, variable=var)
-            cb.grid(row=idx // cols, column=idx % cols, sticky="w", padx=8, pady=2)
+        COLS = 3
+        col = row = 0
 
-    def _set_all_modules(self, val: bool):
+        for key, label in ALL_MODULES:
+            if key is None:
+                tk.Label(inner, text=label,
+                         bg=C["surface"], fg=C["text_dim"],
+                         font=FONT_SECTION, anchor="w",
+                         ).grid(row=row, column=0, columnspan=COLS,
+                                sticky="w", padx=8, pady=(10, 2))
+                row += 1
+                col = 0
+            else:
+                var = tk.BooleanVar(value=False)
+                self._module_vars[key] = var
+                ttk.Checkbutton(inner, text=label, variable=var
+                                ).grid(row=row, column=col,
+                                       sticky="w", padx=8, pady=2)
+                col += 1
+                if col >= COLS:
+                    col = 0
+                    row += 1
+
+    def _set_all_mods(self, val: bool):
         for v in self._module_vars.values():
             v.set(val)
 
-    # ── Offline Excel Tab ──────────────────────────────────────────────────────
+    # ── Offline Excel tab ──────────────────────────────────────────────────────
 
-    def _build_excel_tab(self):
+    def _build_excel(self):
         f = self._tab_excel
 
-        ttk.Label(f, text="Generate an Excel report from an existing CSV directory\n"
-                           "(No AD connection required — standalone mode).",
-                  wraplength=600).pack(anchor="w", pady=(0, 12))
+        tk.Label(f, text="Generate an Excel report from an existing CSV directory "
+                         "— no AD connection required.",
+                 bg=C["surface"], fg=C["text_muted"], font=FONT_SMALL,
+                 wraplength=640, justify="left").pack(anchor="w", pady=(0, 12))
 
-        csv_frame = ttk.Frame(f)
-        csv_frame.pack(fill="x")
+        self._sec(f, "Input")
+        r = tk.Frame(f, bg=C["surface"])
+        r.pack(fill="x", pady=3)
         self._csv_dir_var = tk.StringVar()
-        ttk.Label(csv_frame, text="CSV Directory:").pack(side="left", padx=(0, 8))
-        ttk.Entry(csv_frame, textvariable=self._csv_dir_var, width=50).pack(side="left", expand=True, fill="x")
-        ttk.Button(csv_frame, text="Browse…", command=self._browse_csv_dir).pack(side="left", padx=(6, 0))
+        self._lbl(r, "CSV Directory:")
+        DE(r, textvariable=self._csv_dir_var).pack(side="left", fill="x", expand=True)
+        DB(r, primary=False, text="Browse…", pady=5, padx=10,
+           command=self._browse_csv_dir).pack(side="left", padx=(6, 0))
 
-        out_frame = ttk.Frame(f)
-        out_frame.pack(fill="x", pady=(8, 0))
+        self._div(f)
+        self._sec(f, "Output")
+        r2 = tk.Frame(f, bg=C["surface"])
+        r2.pack(fill="x", pady=3)
         self._excel_out_var = tk.StringVar()
-        ttk.Label(out_frame, text="Output File (.xlsx):").pack(side="left", padx=(0, 8))
-        ttk.Entry(out_frame, textvariable=self._excel_out_var, width=50).pack(side="left", expand=True, fill="x")
-        ttk.Button(out_frame, text="Browse…", command=self._browse_excel_out).pack(side="left", padx=(6, 0))
+        self._lbl(r2, "Output File (.xlsx):")
+        DE(r2, textvariable=self._excel_out_var).pack(side="left", fill="x", expand=True)
+        DB(r2, primary=False, text="Browse…", pady=5, padx=10,
+           command=self._browse_excel_out).pack(side="left", padx=(6, 0))
 
-        ttk.Button(f, text="▶  Generate Excel", command=self._run_excel_mode).pack(anchor="w", pady=12)
+        self._div(f)
+        DB(f, text="▶  Generate Excel",
+           command=self._run_excel_mode).pack(anchor="w")
 
     def _browse_csv_dir(self):
         d = filedialog.askdirectory(title="Select CSV directory")
@@ -442,24 +688,46 @@ class PyADReconGUI(tk.Tk):
             self._csv_dir_var.set(d)
 
     def _browse_excel_out(self):
-        f = filedialog.asksaveasfilename(
-            title="Save Excel report as",
+        fp = filedialog.asksaveasfilename(
+            title="Save Excel as",
             defaultextension=".xlsx",
-            filetypes=[("Excel files", "*.xlsx"), ("All", "*")]
+            filetypes=[("Excel", "*.xlsx"), ("All", "*")],
         )
-        if f:
-            self._excel_out_var.set(f)
+        if fp:
+            self._excel_out_var.set(fp)
 
-    # ── Command Building ───────────────────────────────────────────────────────
+    # ── Layout helpers ─────────────────────────────────────────────────────────
+
+    def _sec(self, parent, text: str):
+        tk.Label(parent, text=text.upper(),
+                 bg=C["surface"], fg=C["text_dim"],
+                 font=FONT_SECTION).pack(anchor="w", pady=(4, 4))
+
+    def _div(self, parent):
+        tk.Frame(parent, bg=C["border"], height=1).pack(fill="x", pady=10)
+
+    def _lbl(self, parent, text: str):
+        tk.Label(parent, text=text,
+                 bg=C["surface"], fg=C["text_muted"],
+                 font=FONT_SMALL, width=LABEL_W, anchor="w").pack(side="left")
+
+    def _row(self, parent, label: str, widget_cls, **kw):
+        r = tk.Frame(parent, bg=C["surface"])
+        r.pack(fill="x", pady=3)
+        self._lbl(r, label)
+        w = widget_cls(r, **kw)
+        w.pack(side="left", fill="x", expand=True)
+        return w
+
+    # ── Command building ───────────────────────────────────────────────────────
 
     def _build_command(self) -> list[str] | None:
-        """Build the subprocess argument list. Returns None on validation error."""
         exe = find_pyadrecon()
         if not exe:
             messagebox.showerror(
-                "Not found",
+                "Not Found",
                 "pyadrecon not found on PATH.\n\n"
-                "Install it with:\n  pipx install pyadrecon\nor\n  pip install pyadrecon"
+                "Install with:\n  pipx install pyadrecon\nor\n  pip install pyadrecon",
             )
             return None
 
@@ -468,7 +736,8 @@ class PyADReconGUI(tk.Tk):
             messagebox.showerror("Validation", "Domain Controller is required.")
             return None
         if not validate_ip_or_hostname(dc):
-            messagebox.showerror("Validation", "Domain Controller contains invalid characters.")
+            messagebox.showerror("Validation",
+                "Domain Controller contains invalid characters.")
             return None
 
         username = self._username_var.get().strip()
@@ -481,7 +750,8 @@ class PyADReconGUI(tk.Tk):
             messagebox.showerror("Validation", "Domain is required.")
             return None
         if not validate_domain(domain):
-            messagebox.showerror("Validation", "Domain contains invalid characters.")
+            messagebox.showerror("Validation",
+                "Domain contains invalid characters.")
             return None
 
         port = self._port_var.get().strip()
@@ -489,15 +759,14 @@ class PyADReconGUI(tk.Tk):
             messagebox.showerror("Validation", "Port must be a number.")
             return None
 
-        # Validate numeric options
-        for label, var in [
-            ("Page Size",            self._page_size_var),
-            ("Dormant Days",         self._dormant_var),
-            ("Password Age",         self._pw_age_var),
+        for lbl, var in [
+            ("Page Size",    self._page_size_var),
+            ("Dormant Days", self._dormant_var),
+            ("Password Age", self._pw_age_var),
         ]:
-            val = var.get().strip()
-            if val and not val.isdigit():
-                messagebox.showerror("Validation", f"{label} must be a number.")
+            v = var.get().strip()
+            if v and not v.isdigit():
+                messagebox.showerror("Validation", f"{lbl} must be a number.")
                 return None
 
         threads = self._threads_var.get().strip()
@@ -505,26 +774,19 @@ class PyADReconGUI(tk.Tk):
             messagebox.showerror("Validation", "Threads must be a number.")
             return None
 
-        # Kerberos-specific validation
-        auth = self._auth_var.get()
+        auth    = self._auth_var.get()
         tgt_b64 = self._tgt_b64_var.get().strip()
-        if auth == "kerberos" and tgt_b64:
-            if not validate_base64(tgt_b64):
-                messagebox.showerror("Validation", "TGT Base64 string is not valid base64.")
-                return None
+        if auth == "kerberos" and tgt_b64 and not validate_base64(tgt_b64):
+            messagebox.showerror("Validation",
+                "TGT Base64 string is not valid base64.")
+            return None
 
-        # ── Assemble args list ─────────────────────────────────────────────────
-        # Use sys.executable for .py files
-        if exe.endswith(".py"):
-            cmd = [sys.executable, exe]
-        else:
-            cmd = [exe]
-
+        cmd = [sys.executable, exe] if exe.endswith(".py") else [exe]
         cmd += ["-dc", dc, "-u", username, "-d", domain]
 
-        password = self._password_var.get()
-        if password:
-            cmd += ["-p", password]  # NOTE: see security note in README
+        pw = self._password_var.get()
+        if pw:
+            cmd += ["-p", pw]
 
         if auth == "kerberos":
             cmd += ["--auth", "kerberos"]
@@ -533,47 +795,39 @@ class PyADReconGUI(tk.Tk):
                 cmd += ["--tgt-file", tgt_file]
             elif tgt_b64:
                 cmd += ["--tgt-base64", tgt_b64]
-        # ntlm is default, no flag needed
 
         if self._ssl_var.get():
             cmd.append("--ssl")
-
         if port and port != "389":
             cmd += ["--port", port]
 
-        output = self._output_var.get().strip()
-        if output:
-            cmd += ["-o", output]
+        out = self._output_dir_var.get().strip()
+        if out:
+            cmd += ["-o", out]
 
-        page_size = self._page_size_var.get().strip()
-        if page_size and page_size != "500":
-            cmd += ["--page-size", page_size]
-
+        ps = self._page_size_var.get().strip()
+        if ps and ps != "500":
+            cmd += ["--page-size", ps]
         if threads:
             cmd += ["--threads", threads]
-
         dormant = self._dormant_var.get().strip()
         if dormant and dormant != "90":
             cmd += ["--dormant-days", dormant]
-
         pw_age = self._pw_age_var.get().strip()
         if pw_age and pw_age != "180":
             cmd += ["--password-age", pw_age]
 
         if self._only_enabled_var.get():
             cmd.append("--only-enabled")
-
         if self._no_excel_var.get():
             cmd.append("--no-excel")
-
         if self._verbose_var.get():
             cmd.append("-v")
 
-        workstation = self._workstation_var.get().strip()
-        if workstation and auth == "ntlm":
-            cmd += ["--workstation", workstation]
+        ws = self._workstation_var.get().strip()
+        if ws and auth == "ntlm":
+            cmd += ["--workstation", ws]
 
-        # Modules
         selected = [k for k, v in self._module_vars.items() if v.get()]
         if selected:
             cmd += ["--collect", ",".join(selected)]
@@ -585,56 +839,45 @@ class PyADReconGUI(tk.Tk):
     def _run(self):
         if self._running:
             return
-
         cmd = self._build_command()
         if cmd is None:
             return
 
-        # Show a sanitised preview (mask password)
+        # Sanitised preview (mask password)
         preview = " ".join(
             "●●●●" if prev in ("-p", "--password") else a
             for prev, a in zip([""] + cmd, cmd)
         )
         self._cmd_var.set(preview)
-
         self._clear_log()
-        self._log(f"Running: {preview}\n", "info")
-
-        self._running = True
-        self._run_btn.config(state="disabled")
-        self._stop_btn.config(state="normal")
-
-        thread = threading.Thread(target=self._run_thread, args=(cmd,), daemon=True)
-        thread.start()
+        self._log(f"$ {preview}\n\n", "dim")
+        self._set_running(True)
+        threading.Thread(target=self._run_thread, args=(cmd,), daemon=True).start()
 
     def _run_excel_mode(self):
         csv_dir = self._csv_dir_var.get().strip()
         if not csv_dir or not Path(csv_dir).is_dir():
-            messagebox.showerror("Validation", "Please select a valid CSV directory.")
+            messagebox.showerror("Validation",
+                "Please select a valid CSV directory.")
             return
-
         exe = find_pyadrecon()
         if not exe:
-            messagebox.showerror("Not found", "pyadrecon not found on PATH.")
+            messagebox.showerror("Not Found", "pyadrecon not found on PATH.")
             return
 
         cmd = [sys.executable, exe] if exe.endswith(".py") else [exe]
         cmd += ["--generate-excel-from", csv_dir]
-
-        excel_out = self._excel_out_var.get().strip()
-        if excel_out:
-            cmd += ["-o", excel_out]
+        xl_out = self._excel_out_var.get().strip()
+        if xl_out:
+            cmd += ["-o", xl_out]
 
         self._clear_log()
-        self._log(f"Running Excel generation: {' '.join(cmd)}\n", "info")
-        self._running = True
-        self._run_btn.config(state="disabled")
-        self._stop_btn.config(state="normal")
+        self._log(f"$ {' '.join(cmd)}\n\n", "dim")
+        self._set_running(True)
         threading.Thread(target=self._run_thread, args=(cmd,), daemon=True).start()
 
     def _run_thread(self, cmd: list[str]):
         try:
-            # shell=False prevents injection; credentials are list elements, not shell-expanded
             self._process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
@@ -644,31 +887,47 @@ class PyADReconGUI(tk.Tk):
                 shell=False,          # SECURITY: never True
             )
             for line in self._process.stdout:
-                tag = "err" if any(w in line.lower() for w in ("error", "fail", "exception")) else None
+                lo = line.lower()
+                if any(w in lo for w in ("error", "fail", "exception", "traceback")):
+                    tag = "err"
+                elif any(w in lo for w in ("warn", "warning")):
+                    tag = "warn"
+                elif any(w in lo for w in ("success", "done", "finish", "complete")):
+                    tag = "ok"
+                else:
+                    tag = None
                 self._log(line, tag)
             self._process.wait()
             rc = self._process.returncode
-            if rc == 0:
-                self._log("\n✅ Finished successfully.\n", "ok")
-            else:
-                self._log(f"\n❌ Exited with code {rc}.\n", "err")
+            self._log(
+                f"\n{'✅' if rc == 0 else '❌'}  Exited with code {rc}.\n",
+                "ok" if rc == 0 else "err",
+            )
         except FileNotFoundError as e:
-            self._log(f"\n❌ {e}\n", "err")
+            self._log(f"\n❌  {e}\n", "err")
         except Exception as e:
-            self._log(f"\n❌ Unexpected error: {e}\n", "err")
+            self._log(f"\n❌  Unexpected error: {e}\n", "err")
         finally:
             self._process = None
-            self._running = False
-            self.after(0, self._reset_buttons)
+            self.after(0, lambda: self._set_running(False))
 
     def _stop(self):
         if self._process:
             self._process.terminate()
-            self._log("\n⚠  Process terminated by user.\n", "err")
+            self._log("\n⚠  Process terminated by user.\n", "warn")
 
-    def _reset_buttons(self):
-        self._run_btn.config(state="normal")
-        self._stop_btn.config(state="disabled")
+    def _set_running(self, running: bool):
+        self._running = running
+        if running:
+            self._run_btn.config(state="disabled")
+            self._stop_btn.config(state="normal")
+            self._status_var.set("Running…")
+            self._status_dot.config(fg=C["success"])
+        else:
+            self._run_btn.config(state="normal")
+            self._stop_btn.config(state="disabled")
+            self._status_var.set("Idle")
+            self._status_dot.config(fg=C["text_dim"])
 
     # ── Log helpers ────────────────────────────────────────────────────────────
 
@@ -688,14 +947,14 @@ class PyADReconGUI(tk.Tk):
         self._output.delete("1.0", "end")
         self._output.config(state="disabled")
 
-    # ── Clean exit ─────────────────────────────────────────────────────────────
+    # ── Exit ───────────────────────────────────────────────────────────────────
 
     def _on_close(self):
         if self._running:
-            if not messagebox.askyesno("Exit", "A scan is running. Terminate and exit?"):
+            if not messagebox.askyesno("Exit",
+                    "A scan is running. Terminate and exit?"):
                 return
             self._stop()
-        # Clear sensitive data from memory
         self._password_var.set("")
         self._tgt_b64_var.set("")
         self.destroy()
